@@ -12,7 +12,7 @@ use std::{collections::HashMap, sync::Arc};
 #[derive(Clone)]
 pub struct Requirement {
     pub resource: String,
-    pub action: String,
+    pub actions: Vec<String>,
 }
 
 /// Route matcher for a specific HTTP method (secured routes with requirements)
@@ -230,7 +230,7 @@ pub fn build_auth_state(
     let mut route_matchers_map: HashMap<Method, RouteMatcher> = HashMap::new();
 
     for ((method, path), requirement) in requirements {
-        let sec_req = SecRequirement::new(requirement.resource, requirement.action);
+        let sec_req = SecRequirement::new(requirement.resource, requirement.actions);
         let matcher = route_matchers_map
             .entry(method)
             .or_insert_with(RouteMatcher::new);
@@ -366,7 +366,7 @@ mod tests {
     async fn explicit_secured_route_with_requirement_returns_required() {
         let mut route_matchers = HashMap::new();
         let mut matcher = RouteMatcher::new();
-        let sec_req = SecRequirement::new("admin", "access");
+        let sec_req = SecRequirement::new("admin", ["access"]);
         matcher.insert("/admin/metrics", sec_req.clone()).unwrap();
         route_matchers.insert(Method::GET, matcher);
 
@@ -376,7 +376,7 @@ mod tests {
         match result {
             AuthRequirement::Required(Some(req)) => {
                 assert_eq!(req.resource, "admin");
-                assert_eq!(req.action, "access");
+                assert_eq!(req.actions, vec!["access"]);
             }
             _ => panic!("Expected Required with SecRequirement"),
         }
@@ -431,7 +431,7 @@ mod tests {
     async fn secured_route_has_priority_over_default() {
         let mut route_matchers = HashMap::new();
         let mut matcher = RouteMatcher::new();
-        let sec_req = SecRequirement::new("users", "read");
+        let sec_req = SecRequirement::new("users", ["read"]);
         // matchit 0.8 uses {param} syntax
         matcher.insert("/users/{id}", sec_req).unwrap();
         route_matchers.insert(Method::GET, matcher);
@@ -442,7 +442,7 @@ mod tests {
         match result {
             AuthRequirement::Required(Some(req)) => {
                 assert_eq!(req.resource, "users");
-                assert_eq!(req.action, "read");
+                assert_eq!(req.actions, vec!["read"]);
             }
             _ => panic!("Expected Required with SecRequirement"),
         }
@@ -454,7 +454,7 @@ mod tests {
 
         // GET /users is secured
         let mut get_matcher = RouteMatcher::new();
-        let sec_req = SecRequirement::new("users", "read");
+        let sec_req = SecRequirement::new("users", ["read"]);
         get_matcher.insert("/users", sec_req).unwrap();
         route_matchers.insert(Method::GET, get_matcher);
 

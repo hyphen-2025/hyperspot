@@ -303,7 +303,7 @@ async fn secured_route_with_sec_requirement_denied_returns_403() {
     let validator = Arc::new(IntegrationValidator::new_ok(fake_claims(Uuid::new_v4())));
     let scope_builder = Arc::new(IntegrationScopeBuilder);
     let authorizer = Arc::new(IntegrationAuthorizer::new_err());
-    let sec_req = SecRequirement::new("admin", "access");
+    let sec_req = SecRequirement::new("admin", ["access"]);
     let policy = Arc::new(AuthRequirement::Required(Some(sec_req)));
 
     let app = build_test_router(policy, validator, scope_builder, authorizer);
@@ -320,7 +320,7 @@ async fn secured_route_with_sec_requirement_allowed_returns_ok() {
     let validator = Arc::new(IntegrationValidator::new_ok(fake_claims(sub_id)));
     let scope_builder = Arc::new(IntegrationScopeBuilder);
     let authorizer = Arc::new(IntegrationAuthorizer::new_ok());
-    let sec_req = SecRequirement::new("admin", "access");
+    let sec_req = SecRequirement::new("admin", ["access"]);
     let policy = Arc::new(AuthRequirement::Required(Some(sec_req)));
 
     let app = build_test_router(policy, validator, scope_builder, authorizer);

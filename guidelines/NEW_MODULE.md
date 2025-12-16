@@ -478,7 +478,7 @@ The `modkit::api::prelude` module provides:
 // src/api/rest/routes.rs
 router = OperationBuilder::get("/users/{id}")
     .operation_id("users_info.get_user")
-    .require_auth("users", "read")
+    .require_auth(&Resources::Users, &[Actions::Read])
     .handler(handlers::get_user)
     .json_response_with_schema::<UserDto>(openapi, StatusCode::OK, "User found")
     .error_400(openapi)   // Bad Request
@@ -619,7 +619,7 @@ pub trait UsersInfoApi: Send + Sync {
     /// Get a user by ID
     async fn get_user(&self, ctx: &SecurityCtx, id: Uuid) -> Result<User, UsersInfoError>;
 
-    /// List users with cursor-based pagination
+    /// List users with OData pagination
     async fn list_users(
         &self,
         ctx: &SecurityCtx,
@@ -932,7 +932,10 @@ This is where all components are assembled and registered with ModKit.
       use <module>_sdk::api::YourModuleApi;
       let local_client = YourLocalClient::new(domain_service);
       let api: Arc<dyn YourModuleApi> = Arc::new(local_client);
+
+      // Register directly in ClientHub — no expose_* helper, no macro glue
       ctx.client_hub().register::<dyn YourModuleApi>(api);
+      info!("YourModule API registered in ClientHub via local adapter");
       ```
    7. Config structs SHOULD use `#[serde(deny_unknown_fields)]` and provide safe defaults.
 
@@ -1091,7 +1094,7 @@ Edit `apps/hyperspot-server/src/main.rs` in the `_ensure_modules_linked()` funct
 fn _ensure_modules_linked() {
     // Make sure all modules are linked
     let _ = std::any::type_name::<api_ingress::ApiIngress>();
-    let _ = std::any::type_name::<your_module::YourModule>();  // Add this line
+    let _ = std::any::type_name::<your_module::YourModule>();  # Add this line
     #[cfg(feature = "users-info-example")]
     let _ = std::any::type_name::<users_info::UsersInfo>();
 }
@@ -1237,7 +1240,7 @@ external API clients.
 
 5. **`src/api/rest/routes.rs`:**
    **Rule:** Register ALL endpoints in a single `register_routes` function.
-   **Rule:** Use `OperationBuilder` for every route with `.require_auth("resource", "action")` for protected endpoints.
+   **Rule:** Use `OperationBuilder` for every route with `.require_auth(&Resources::X, &[Actions::Y])` for protected endpoints.
    **Rule:** Use `.error_400(openapi)`, `.error_404(openapi)` etc. instead of raw `.problem_response()`.
    **Rule:** After all routes are registered, attach the service ONCE with `router.layer(Extension(service.clone()))`.
 
@@ -1258,7 +1261,7 @@ external API clients.
            .operation_id("users_info.list_users")
            .summary("List users with cursor pagination")
            .tag("users")
-           .require_auth("users", "read")
+           .require_auth(&Resources::Users, &[Actions::Read])
            .query_param_typed("limit", false, "Max users to return", "integer")
            .query_param("cursor", false, "Cursor for pagination")
            .handler(handlers::list_users)
@@ -1276,7 +1279,7 @@ external API clients.
            .operation_id("users_info.get_user")
            .summary("Get user by ID")
            .tag("users")
-           .require_auth("users", "read")
+           .require_auth(&Resources::Users, &[Actions::Read])
            .path_param("id", "User UUID")
            .handler(handlers::get_user)
            .json_response_with_schema::<dto::UserDto>(openapi, http::StatusCode::OK, "User found")
@@ -1291,7 +1294,7 @@ external API clients.
            .operation_id("users_info.create_user")
            .summary("Create a new user")
            .tag("users")
-           .require_auth("users", "create")
+           .require_auth(&Resources::Users, &[Actions::Create])
            .json_request::<dto::CreateUserReq>(openapi, "User creation data")
            .handler(handlers::create_user)
            .json_response_with_schema::<dto::UserDto>(openapi, http::StatusCode::CREATED, "Created")
@@ -1307,7 +1310,7 @@ external API clients.
            .operation_id("users_info.delete_user")
            .summary("Delete user")
            .tag("users")
-           .require_auth("users", "delete")
+           .require_auth(&Resources::Users, &[Actions::Delete])
            .path_param("id", "User UUID")
            .handler(handlers::delete_user)
            .json_response(http::StatusCode::NO_CONTENT, "User deleted")

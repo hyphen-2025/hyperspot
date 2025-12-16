@@ -132,7 +132,7 @@ impl ApiIngress {
                     route_key.clone(),
                     auth::Requirement {
                         resource: sec.resource.clone(),
-                        action: sec.action.clone(),
+                        actions: sec.actions.clone(),
                     },
                 );
             }

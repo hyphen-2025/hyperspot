@@ -1,11 +1,41 @@
 use crate::api::rest::{dto, handlers};
 use crate::domain::service::Service;
 use axum::{Extension, Router};
-use modkit::api::operation_builder::OperationBuilderODataExt;
+use modkit::api::operation_builder::{OperationBuilderODataExt, RbacAction, RbacResource};
 use modkit::api::{OpenApiRegistry, OperationBuilder};
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::timeout::TimeoutLayer;
+
+enum Resource {
+    Users,
+}
+
+enum Action {
+    Read,
+    Delete,
+    Update,
+    Create,
+}
+
+impl RbacResource for Resource {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Resource::Users => "users",
+        }
+    }
+}
+
+impl RbacAction for Action {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Action::Read => "read",
+            Action::Delete => "delete",
+            Action::Update => "update",
+            Action::Create => "create",
+        }
+    }
+}
 
 #[allow(clippy::needless_pass_by_value)] // Arc is intentionally passed by value for Extension layer
 pub fn register_routes(
@@ -21,7 +51,7 @@ pub fn register_routes(
         .summary("List users with cursor pagination")
         .description("Retrieve a paginated list of users using cursor-based pagination")
         .tag("users")
-        .require_auth("users", "read")
+        .require_auth(&Resource::Users, &[Action::Read])
         .query_param_typed("limit", false, "Maximum number of users to return", "integer")
         .query_param("cursor", false, "Cursor for pagination")
         .handler(handlers::list_users)
@@ -35,7 +65,7 @@ pub fn register_routes(
     // GET /users/{id} - Get a specific user
     router = OperationBuilder::get("/users/{id}")
         .operation_id("users_info.get_user")
-        .require_auth("users", "read")
+        .require_auth(&Resource::Users, &[Action::Read])
         .summary("Get user by ID")
         .description("Retrieve a specific user by their UUID")
         .tag("users")
@@ -51,7 +81,7 @@ pub fn register_routes(
     // POST /users - Create a new user
     router = OperationBuilder::post("/users")
         .operation_id("users_info.create_user")
-        .require_auth("users", "create")
+        .require_auth(&Resource::Users, &[Action::Create])
         .summary("Create a new user")
         .description("Create a new user with the provided information")
         .tag("users")
@@ -72,7 +102,7 @@ pub fn register_routes(
     // PUT /users/{id} - Update a user
     router = OperationBuilder::put("/users/{id}")
         .operation_id("users_info.update_user")
-        .require_auth("users", "update")
+        .require_auth(&Resource::Users, &[Action::Update])
         .summary("Update user")
         .description("Update a user with partial data")
         .tag("users")
@@ -91,7 +121,7 @@ pub fn register_routes(
     // DELETE /users/{id} - Delete a user
     router = OperationBuilder::delete("/users/{id}")
         .operation_id("users_info.delete_user")
-        .require_auth("users", "delete") // ← Explicit auth requirement
+        .require_auth(&Resource::Users, &[Action::Delete]) // ← Explicit auth requirement
         .summary("Delete user")
         .description("Delete a user by their UUID")
         .tag("users")
@@ -121,7 +151,7 @@ where
     // First register the route, then add layers
     let router = OperationBuilder::get("/users/events")
         .operation_id("users_info.events")
-        .require_auth("users", "read") // ← Explicit auth requirement for event stream
+        .require_auth(&Resource::Users, &[Action::Read]) // ← Explicit auth requirement for event stream
         .summary("User events stream (SSE)")
         .description("Real-time stream of user events as Server-Sent Events")
         .tag("users")

@@ -2,14 +2,15 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecRequirement {
     pub resource: String,
-    pub action: String,
+    pub actions: Vec<String>,
 }
 
 impl SecRequirement {
-    pub fn new(resource: impl Into<String>, action: impl Into<String>) -> Self {
+    pub fn new<S>(resource: impl Into<String>, actions: impl IntoIterator<Item=S>) -> Self 
+    where S: Into<String> {
         Self {
             resource: resource.into(),
-            action: action.into(),
+            actions: actions.into_iter().map(Into::into).collect(),
         }
     }
 }

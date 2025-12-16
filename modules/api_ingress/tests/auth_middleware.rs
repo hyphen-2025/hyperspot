@@ -16,11 +16,7 @@ use axum::{
     Json, Router,
 };
 use modkit::{
-    api::OperationBuilder,
-    config::ConfigProvider,
-    context::ModuleCtx,
-    contracts::{OpenApiRegistry, RestHostModule, RestfulModule},
-    ClientHub, Module,
+    ClientHub, Module, api::{OperationBuilder, operation_builder::{RbacAction, RbacResource}}, config::ConfigProvider, context::ModuleCtx, contracts::{OpenApiRegistry, RestHostModule, RestfulModule}
 };
 use modkit_auth::axum_ext::Authz;
 use serde::{Deserialize, Serialize};
@@ -103,6 +99,30 @@ impl Module for TestAuthModule {
     }
 }
 
+enum TestResource {
+    Test,
+}
+
+impl RbacResource for TestResource {
+    fn as_str(&self) -> &'static str {
+        match self {
+            TestResource::Test => "test",
+        }
+    }
+}
+
+enum Action {
+    Read,
+}
+
+impl RbacAction for Action {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Action::Read => "read",
+        }
+    }
+}
+
 impl RestfulModule for TestAuthModule {
     fn register_rest(
         &self,
@@ -113,7 +133,7 @@ impl RestfulModule for TestAuthModule {
         // Protected route with explicit auth requirement
         let router = OperationBuilder::get("/api/protected")
             .operation_id("test.protected")
-            .require_auth("test", "read")
+            .require_auth(&TestResource::Test, &[Action::Read])
             .summary("Protected endpoint")
             .handler(protected_handler)
             .json_response_with_schema::<TestResponse>(openapi, http::StatusCode::OK, "Success")
@@ -124,7 +144,7 @@ impl RestfulModule for TestAuthModule {
         // Protected route with path parameter (to test pattern matching)
         let router = OperationBuilder::get("/api/users/{id}")
             .operation_id("test.get_user")
-            .require_auth("users", "read")
+            .require_auth(&TestResource::Test, &[Action::Read])
             .summary("Get user by ID")
             .path_param("id", "User ID")
             .handler(protected_handler)

@@ -8,32 +8,31 @@ pub struct RoleAuthorizer;
 impl RoleAuthorizer {
     /// Check if any role matches the requirement pattern
     fn check_role(claims: &Claims, requirement: &SecRequirement) -> bool {
-        let required_role = format!("{}:{}", requirement.resource, requirement.action);
-
-        // Check for exact match or wildcard patterns
-        claims.roles.iter().any(|role| {
-            // Exact match: "users:read"
-            if role == &required_role {
-                return true;
+        fn role_matches(role_pattern: &str, req_resource: &str, req_action: &str) -> bool {
+            match role_pattern {
+                "*:*" => true,
+                pattern if pattern.ends_with(":*") => {
+                    let resource = &pattern[..pattern.len() - 2];
+                    resource == req_resource
+                }
+                pattern if pattern.starts_with("*:") => {
+                    let action = &pattern[2..];
+                    req_action == action
+                }
+                _ => role_pattern == format!("{req_resource}:{req_action}"),
             }
+        }
 
-            // Resource wildcard: "users:*"
-            if role == &format!("{}:*", requirement.resource) {
-                return true;
-            }
-
-            // Action wildcard: "*:read"
-            if role == &format!("*:{}", requirement.action) {
-                return true;
-            }
-
-            // Full wildcard: "*:*"
-            if role == "*:*" {
-                return true;
-            }
-
-            false
-        })
+        requirement
+            .actions
+            .iter()
+            .map(|action| (requirement.resource.as_str(), action.as_str()))
+            .any(|required_role| {
+                claims
+                    .roles
+                    .iter()
+                    .any(|role| role_matches(role, required_role.0, required_role.1))
+            })
     }
 }
 
@@ -71,7 +70,7 @@ mod tests {
     async fn test_exact_role_match() {
         let auth = RoleAuthorizer;
         let claims = mock_claims(vec!["users:read".to_owned()]);
-        let req = SecRequirement::new("users", "read");
+        let req = SecRequirement::new("users",["read"]);
 
         assert!(auth.check(&claims, &req).await.is_ok());
     }
@@ -80,7 +79,7 @@ mod tests {
     async fn test_resource_wildcard() {
         let auth = RoleAuthorizer;
         let claims = mock_claims(vec!["users:*".to_owned()]);
-        let req = SecRequirement::new("users", "write");
+        let req = SecRequirement::new("users", ["write"]);
 
         assert!(auth.check(&claims, &req).await.is_ok());
     }
@@ -89,7 +88,7 @@ mod tests {
     async fn test_action_wildcard() {
         let auth = RoleAuthorizer;
         let claims = mock_claims(vec!["*:read".to_owned()]);
-        let req = SecRequirement::new("posts", "read");
+        let req = SecRequirement::new("posts", ["read"]);
 
         assert!(auth.check(&claims, &req).await.is_ok());
     }
@@ -98,7 +97,7 @@ mod tests {
     async fn test_full_wildcard() {
         let auth = RoleAuthorizer;
         let claims = mock_claims(vec!["*:*".to_owned()]);
-        let req = SecRequirement::new("anything", "everything");
+        let req = SecRequirement::new("anything", ["everything"]);
 
         assert!(auth.check(&claims, &req).await.is_ok());
     }
@@ -107,7 +106,7 @@ mod tests {
     async fn test_no_matching_role() {
         let auth = RoleAuthorizer;
         let claims = mock_claims(vec!["posts:read".to_owned()]);
-        let req = SecRequirement::new("users", "read");
+        let req = SecRequirement::new("users", ["read"]);
 
         assert!(matches!(
             auth.check(&claims, &req).await,

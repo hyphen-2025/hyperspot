@@ -740,7 +740,7 @@ OperationBuilder::<Missing, Missing, S>::post("/path")
 
 ```rust
 // Require authentication with resource:action permission:
-.require_auth("users", "read")
+.require_auth(&Resources::Users, &[Actions::Read])
 
 // Or mark as public (no auth required):
 .public()

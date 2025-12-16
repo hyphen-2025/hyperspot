@@ -120,6 +120,14 @@ pub struct ParamSpec {
     pub param_type: String, // JSON Schema type (string, integer, etc.)
 }
 
+pub trait RbacResource {
+    fn as_str(&self) -> &'static str;
+}
+
+pub trait RbacAction {
+    fn as_str(&self) -> &'static str;
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParamLocation {
     Path,
@@ -167,7 +175,7 @@ pub struct ResponseSpec {
 #[derive(Clone, Debug)]
 pub struct OperationSecRequirement {
     pub resource: String,
-    pub action: String,
+    pub actions: Vec<String>,
 }
 
 /// Simplified operation specification for the type-safe builder
@@ -536,14 +544,25 @@ where
     /// * `description` - Optional description for the request body
     ///
     /// # Example
-    /// ```rust,ignore
-    /// OperationBuilder::post("/upload")
+    /// ```rust
+    /// # use axum::Router;
+    /// # use http::StatusCode;
+    /// # use modkit::api::{
+    /// #     openapi_registry::OpenApiRegistryImpl,
+    /// #     operation_builder::OperationBuilder,
+    /// # };
+    /// # async fn upload_handler() -> &'static str { "uploaded" }
+    /// # let registry = OpenApiRegistryImpl::new();
+    /// # let router: Router<()> = Router::new();
+    /// let router = OperationBuilder::post("/upload")
     ///     .operation_id("upload_file")
     ///     .summary("Upload a file")
     ///     .multipart_file_request("file", Some("File to upload"))
+    ///     .public()
     ///     .handler(upload_handler)
-    ///     .json_response(200, "Upload successful")
-    ///     .register(router, &api);
+    ///     .json_response(StatusCode::OK, "Upload successful")
+    ///     .register(router, &registry);
+    /// # let _ = router;
     /// ```
     pub fn multipart_file_request(mut self, field_name: &str, description: Option<&str>) -> Self {
         // Set request body with multipart/form-data content type
@@ -586,14 +605,25 @@ where
     /// * `description` - Optional description for the request body
     ///
     /// # Example
-    /// ```rust,ignore
-    /// OperationBuilder::post("/upload")
+    /// ```rust
+    /// # use axum::Router;
+    /// # use http::StatusCode;
+    /// # use modkit::api::{
+    /// #     openapi_registry::OpenApiRegistryImpl,
+    /// #     operation_builder::OperationBuilder,
+    /// # };
+    /// # async fn upload_handler() -> &'static str { "uploaded" }
+    /// # let registry = OpenApiRegistryImpl::new();
+    /// # let router: Router<()> = Router::new();
+    /// let router = OperationBuilder::post("/upload")
     ///     .operation_id("upload_file")
     ///     .summary("Upload a file")
     ///     .octet_stream_request(Some("Raw file bytes to parse"))
+    ///     .public()
     ///     .handler(upload_handler)
-    ///     .json_response(200, "Upload successful")
-    ///     .register(router, &api);
+    ///     .json_response(StatusCode::OK, "Upload successful")
+    ///     .register(router, &registry);
+    /// # let _ = router;
     /// ```
     pub fn octet_stream_request(mut self, description: Option<&str>) -> Self {
         self.spec.request_body = Some(RequestBodySpec {
@@ -619,13 +649,24 @@ where
     /// validation and does not affect `OpenAPI` request body specifications.
     ///
     /// # Example
-    /// ```rust,ignore
-    /// OperationBuilder::post("/upload")
+    /// ```rust
+    /// # use axum::Router;
+    /// # use http::StatusCode;
+    /// # use modkit::api::{
+    /// #     openapi_registry::OpenApiRegistryImpl,
+    /// #     operation_builder::OperationBuilder,
+    /// # };
+    /// # async fn upload_handler() -> &'static str { "uploaded" }
+    /// # let registry = OpenApiRegistryImpl::new();
+    /// # let router: Router<()> = Router::new();
+    /// let router = OperationBuilder::post("/upload")
     ///     .operation_id("upload_file")
     ///     .allow_content_types(&["multipart/form-data", "application/pdf"])
+    ///     .public()
     ///     .handler(upload_handler)
-    ///     .json_response(200, "Upload successful")
-    ///     .register(router, &api);
+    ///     .json_response(StatusCode::OK, "Upload successful")
+    ///     .register(router, &registry);
+    /// # let _ = router;
     /// ```
     pub fn allow_content_types(mut self, types: &[&'static str]) -> Self {
         self.spec.allowed_request_content_types = Some(types.to_vec());
@@ -642,24 +683,73 @@ where
 {
     /// Require authentication with a specific resource:action permission.
     ///
+    /// This only sets per-route security metadata (`resource` + allowed `actions`).
+    /// Runtime enforcement is performed by middleware when it is configured.
+    ///
+    /// `actions` are treated as "any-of" during authorization (at least one action must match).
+    ///
     /// This method transitions from `AuthNotSet` to `AuthSet` state.
     ///
     /// # Example
-    /// ```rust,ignore
-    /// OperationBuilder::get("/users")
-    ///     .require_auth("users", "read")
-    ///     .handler(list_users)
-    ///     .json_response(200, "List of users")
-    ///     .register(router, &api);
+    /// ```rust
+    /// # use modkit::api::operation_builder::{OperationBuilder, RbacResource, RbacAction};
+    /// # use axum::{extract::Json, Router };
+    /// # use serde::{Serialize};
+    /// #
+    /// # #[derive(Serialize)]
+    /// # pub struct User;
+    /// #
+    /// enum Resource {
+    ///     Users,
+    /// }
+    ///
+    /// impl RbacResource for Resource {
+    ///     fn as_str(&self) -> &'static str {
+    ///       match self {
+    ///         Resource::Users => "users",
+    ///       }
+    ///    }
+    /// }
+    ///
+    /// enum Action {
+    ///     Read,
+    /// }
+    ///
+    /// impl RbacAction for Action {
+    ///    fn as_str(&self) -> &'static str {
+    ///      match self {
+    ///         Action::Read => "read",
+    ///      }
+    ///    }
+    /// }
+    /// #
+    /// # fn register_rest(
+    /// #   router: axum::Router,
+    /// #   api: &dyn modkit::api::OpenApiRegistry,
+    /// # ) -> anyhow::Result<axum::Router> {
+    /// let router = OperationBuilder::get("/users")
+    ///     .require_auth(&Resource::Users, &[Action::Read])
+    ///     .handler(list_users_handler)
+    ///     .json_response(axum::http::StatusCode::OK, "List of users")
+    ///     .register(router, api);
+    /// #  Ok(router)
+    /// # }
+    ///
+    /// # async fn list_users_handler() -> Json<Vec<User>> {
+    /// #   unimplemented!()
+    /// # }
     /// ```
-    pub fn require_auth(
+    pub fn require_auth<A>(
         mut self,
-        resource: impl Into<String>,
-        action: impl Into<String>,
-    ) -> OperationBuilder<H, R, S, AuthSet> {
+        resource: &impl RbacResource,
+        actions: &[A],
+    ) -> OperationBuilder<H, R, S, AuthSet>
+    where
+        A: RbacAction,
+    {
         self.spec.sec_requirement = Some(OperationSecRequirement {
-            resource: resource.into(),
-            action: action.into(),
+            resource: resource.as_str().into(),
+            actions: actions.iter().map(|a| a.as_str().into()).collect(),
         });
         self.spec.is_public = false;
         OperationBuilder {
@@ -678,12 +768,22 @@ where
     /// This method transitions from `AuthNotSet` to `AuthSet` state.
     ///
     /// # Example
-    /// ```rust,ignore
-    /// OperationBuilder::get("/health")
+    /// ```rust
+    /// # use axum::Router;
+    /// # use http::StatusCode;
+    /// # use modkit::api::{
+    /// #     openapi_registry::OpenApiRegistryImpl,
+    /// #     operation_builder::OperationBuilder,
+    /// # };
+    /// # async fn health_check() -> &'static str { "OK" }
+    /// # let registry = OpenApiRegistryImpl::new();
+    /// # let router: Router<()> = Router::new();
+    /// let router = OperationBuilder::get("/health")
     ///     .public()
     ///     .handler(health_check)
-    ///     .json_response(200, "OK")
-    ///     .register(router, &api);
+    ///     .json_response(StatusCode::OK, "OK")
+    ///     .register(router, &registry);
+    /// # let _ = router;
     /// ```
     pub fn public(mut self) -> OperationBuilder<H, R, S, AuthSet> {
         self.spec.is_public = true;
@@ -1055,11 +1155,24 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust
+    /// # use axum::Router;
+    /// # use http::StatusCode;
+    /// # use modkit::api::{
+    /// #     openapi_registry::OpenApiRegistryImpl,
+    /// #     operation_builder::OperationBuilder,
+    /// # };
+    /// # async fn list_users() -> &'static str { "[]" }
+    /// # let registry = OpenApiRegistryImpl::new();
+    /// # let router: Router<()> = Router::new();
     /// let op = OperationBuilder::get("/users")
+    ///     .public()
     ///     .handler(list_users)
     ///     .json_response(StatusCode::OK, "List of users")
     ///     .standard_errors(&registry);
+    ///
+    /// let router = op.register(router, &registry);
+    /// # let _ = router;
     /// ```
     ///
     /// This adds the following error responses:
@@ -1106,12 +1219,33 @@ where
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust
+    /// # use axum::Router;
+    /// # use http::StatusCode;
+    /// # use modkit::api::{
+    /// #     openapi_registry::OpenApiRegistryImpl,
+    /// #     operation_builder::OperationBuilder,
+    /// # };
+    /// # use serde::{Deserialize, Serialize};
+    /// # use utoipa::ToSchema;
+    /// #
+    /// #[derive(Deserialize, Serialize, ToSchema)]
+    /// struct CreateUserRequest {
+    ///     email: String,
+    /// }
+    ///
+    /// # async fn create_user() -> &'static str { "created" }
+    /// # let registry = OpenApiRegistryImpl::new();
+    /// # let router: Router<()> = Router::new();
     /// let op = OperationBuilder::post("/users")
+    ///     .public()
     ///     .handler(create_user)
     ///     .json_request::<CreateUserRequest>(&registry, "User data")
     ///     .json_response(StatusCode::CREATED, "User created")
     ///     .with_422_validation_error(&registry);
+    ///
+    /// let router = op.register(router, &registry);
+    /// # let _ = router;
     /// ```
     pub fn with_422_validation_error(mut self, registry: &dyn OpenApiRegistry) -> Self {
         let validation_error_name =
