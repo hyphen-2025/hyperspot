@@ -14,7 +14,10 @@ pub use grpc_installers::{GrpcInstallerData, GrpcInstallerStore, ModuleInstaller
 pub use host_runtime::{
     DbOptions, HostRuntime, MODKIT_DIRECTORY_ENDPOINT_ENV, MODKIT_MODULE_CONFIG_ENV,
 };
-pub use module_manager::{Endpoint, InstanceState, ModuleInstance, ModuleManager};
+pub use module_manager::{
+    Endpoint, InstanceEvent, InstanceEventKind, InstanceEventSource, InstanceState, ModuleInstance,
+    ModuleManager,
+};
 pub use runner::{
     ClientRegistration, OopModuleSpawnConfig, OopSpawnOptions, RunOptions, ShutdownOptions, run,
 };

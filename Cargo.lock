@@ -855,6 +855,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "utoipa",
 ]
@@ -872,10 +873,13 @@ dependencies = [
  "prost",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
+ "tokio-util",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

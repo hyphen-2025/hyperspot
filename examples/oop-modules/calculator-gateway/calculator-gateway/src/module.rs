@@ -38,10 +38,14 @@ impl modkit::Module for CalculatorGateway {
     async fn init(&self, ctx: &ModuleCtx) -> Result<()> {
         tracing::info!("Initializing {} module", Self::MODULE_NAME);
 
-        // Create domain service with ClientHub for dependency resolution
-        let service = Arc::new(Service::new(ctx.client_hub()));
+        // Create domain service with ClientHub and CancellationToken for
+        // reconnection-safe OoP wiring via wire_and_watch_client.
+        let service = Arc::new(Service::new(
+            ctx.client_hub(),
+            ctx.cancellation_token().clone(),
+        ));
 
-        // Register Service in ClientHub for SDK's wire_client() to access
+        // Register Service in ClientHub for route handlers to access
         ctx.client_hub().register::<Service>(service);
 
         tracing::info!("{} module initialized successfully", Self::MODULE_NAME);

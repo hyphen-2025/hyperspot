@@ -4,7 +4,43 @@ use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::broadcast;
 use uuid::Uuid;
+
+/// Event emitted by `ModuleManager` when an instance is registered, deregistered, or evicted.
+#[derive(Clone, Debug)]
+pub struct InstanceEvent {
+    pub module: String,
+    pub instance_id: Uuid,
+    pub kind: InstanceEventKind,
+    /// gRPC service names from the instance's `grpc_services` keys.
+    pub services: Vec<String>,
+}
+
+/// The kind of lifecycle event for a module instance.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InstanceEventKind {
+    Registered,
+    BecameHealthy,
+    Deregistered,
+    Evicted,
+}
+
+/// Narrow trait for subscribing to instance lifecycle events.
+///
+/// Registered in `ClientHub` as `dyn InstanceEventSource` so that consumers
+/// (e.g. `wire_and_watch`) can observe directory changes without access to
+/// the full `ModuleManager` API.
+pub trait InstanceEventSource: Send + Sync {
+    /// Subscribe to instance lifecycle events.
+    fn subscribe(&self) -> broadcast::Receiver<InstanceEvent>;
+}
+
+impl InstanceEventSource for ModuleManager {
+    fn subscribe(&self) -> broadcast::Receiver<InstanceEvent> {
+        self.events_tx.subscribe()
+    }
+}
 
 /// Represents an endpoint where a module instance can be reached
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -154,13 +190,16 @@ impl ModuleInstance {
 
 /// Central registry that tracks all running module instances in the system.
 /// Provides discovery, health tracking, and round-robin load balancing.
-#[derive(Clone)]
+// NOTE: ModuleManager is intentionally not Clone. DashMap deep-clones its data
+// but broadcast::Sender shares the channel, so a clone would have independent
+// instance state emitting events on the same channel. Always use Arc<ModuleManager>.
 #[must_use]
 pub struct ModuleManager {
     inner: DashMap<String, Vec<Arc<ModuleInstance>>>,
     rr_counters: DashMap<String, usize>,
     hb_ttl: Duration,
     hb_grace: Duration,
+    events_tx: broadcast::Sender<InstanceEvent>,
 }
 
 impl std::fmt::Debug for ModuleManager {
@@ -177,11 +216,16 @@ impl std::fmt::Debug for ModuleManager {
 
 impl ModuleManager {
     pub fn new() -> Self {
+        // Capacity 16: a performance knob, not a correctness concern. The watcher's
+        // Lagged handler already re-resolves unconditionally, so a smaller channel
+        // just means slightly more Lagged fallbacks under burst registrations.
+        let (events_tx, _) = broadcast::channel(16);
         Self {
             inner: DashMap::new(),
             rr_counters: DashMap::new(),
             hb_ttl: Duration::from_secs(15),
             hb_grace: Duration::from_secs(30),
+            events_tx,
         }
     }
 
@@ -191,19 +235,41 @@ impl ModuleManager {
         self
     }
 
+    /// Override the default broadcast channel capacity (default: 16).
+    ///
+    /// Larger values reduce `Lagged` fallbacks under burst registrations;
+    /// the watcher handles `Lagged` correctly, so this is a performance knob.
+    pub fn with_event_channel_capacity(mut self, capacity: usize) -> Self {
+        let (events_tx, _) = broadcast::channel(capacity);
+        self.events_tx = events_tx;
+        self
+    }
+
     /// Register or update a module instance
     pub fn register_instance(&self, instance: Arc<ModuleInstance>) {
         let module = instance.module.clone();
-        let mut vec = self.inner.entry(module).or_default();
-        // replace by instance_id if it already exists
-        if let Some(pos) = vec
-            .iter()
-            .position(|i| i.instance_id == instance.instance_id)
+        let instance_id = instance.instance_id;
+        let services: Vec<String> = instance.grpc_services.keys().cloned().collect();
+
         {
-            vec[pos] = instance;
-        } else {
-            vec.push(instance);
+            let mut vec = self.inner.entry(module.clone()).or_default();
+            // replace by instance_id if it already exists
+            if let Some(pos) = vec
+                .iter()
+                .position(|i| i.instance_id == instance.instance_id)
+            {
+                vec[pos] = instance;
+            } else {
+                vec.push(instance);
+            }
         }
+        // Fire event AFTER releasing DashMap guard
+        drop(self.events_tx.send(InstanceEvent {
+            module,
+            instance_id,
+            kind: InstanceEventKind::Registered,
+            services,
+        }));
     }
 
     /// Mark an instance as ready
@@ -218,15 +284,37 @@ impl ModuleManager {
 
     /// Update the heartbeat timestamp for an instance
     pub fn update_heartbeat(&self, module: &str, instance_id: Uuid, at: Instant) {
+        let mut became_healthy: Option<(String, Vec<String>)> = None;
+
         if let Some(mut vec) = self.inner.get_mut(module)
             && let Some(inst) = vec.iter_mut().find(|i| i.instance_id == instance_id)
         {
-            let mut state = inst.inner.write();
-            state.last_heartbeat = at;
-            // Transition Registered -> Healthy on first heartbeat
-            if state.state == InstanceState::Registered {
-                state.state = InstanceState::Healthy;
+            let was_registered = {
+                let mut state = inst.inner.write();
+                state.last_heartbeat = at;
+                if state.state == InstanceState::Registered {
+                    state.state = InstanceState::Healthy;
+                    true
+                } else {
+                    false
+                }
+            };
+            if was_registered {
+                became_healthy = Some((
+                    module.to_owned(),
+                    inst.grpc_services.keys().cloned().collect(),
+                ));
             }
+        }
+
+        // Fire event AFTER releasing DashMap guard
+        if let Some((module_name, services)) = became_healthy {
+            drop(self.events_tx.send(InstanceEvent {
+                module: module_name,
+                instance_id,
+                kind: InstanceEventKind::BecameHealthy,
+                services,
+            }));
         }
     }
 
@@ -251,9 +339,14 @@ impl ModuleManager {
     /// Remove an instance from the directory
     pub fn deregister(&self, module: &str, instance_id: Uuid) {
         let mut remove_module = false;
+        let mut services = Vec::new();
         {
             if let Some(mut vec) = self.inner.get_mut(module) {
                 let list = vec.value_mut();
+                // Collect service names before removal
+                if let Some(inst) = list.iter().find(|i| i.instance_id == instance_id) {
+                    services = inst.grpc_services.keys().cloned().collect();
+                }
                 list.retain(|inst| inst.instance_id != instance_id);
                 if list.is_empty() {
                     remove_module = true;
@@ -265,6 +358,16 @@ impl ModuleManager {
             self.inner.remove(module);
             self.rr_counters.remove(module);
         }
+
+        // Fire event AFTER releasing DashMap guard — always fire, even for
+        // instances with no gRPC services. The watcher filters by service name,
+        // so empty-services events are harmless and this is more predictable.
+        drop(self.events_tx.send(InstanceEvent {
+            module: module.to_owned(),
+            instance_id,
+            kind: InstanceEventKind::Deregistered,
+            services,
+        }));
     }
 
     /// Get all instances of a specific module
@@ -289,6 +392,7 @@ impl ModuleManager {
     pub fn evict_stale(&self, now: Instant) {
         use InstanceState::{Draining, Quarantined};
         let mut empty_modules = Vec::new();
+        let mut evicted = Vec::new();
 
         for mut entry in self.inner.iter_mut() {
             let module = entry.key().clone();
@@ -306,6 +410,12 @@ impl ModuleManager {
 
                 // Evict quarantined instances that exceed grace period
                 if state.state == Quarantined && age >= self.hb_ttl + self.hb_grace {
+                    evicted.push(InstanceEvent {
+                        module: module.clone(),
+                        instance_id: inst.instance_id,
+                        kind: InstanceEventKind::Evicted,
+                        services: inst.grpc_services.keys().cloned().collect(),
+                    });
                     return false; // Remove from directory
                 }
 
@@ -320,6 +430,11 @@ impl ModuleManager {
         for module in empty_modules {
             self.inner.remove(&module);
             self.rr_counters.remove(&module);
+        }
+
+        // Fire eviction events AFTER releasing DashMap locks
+        for event in evicted {
+            drop(self.events_tx.send(event));
         }
     }
 
@@ -730,5 +845,39 @@ mod tests {
         assert_ne!(inst1.instance_id, inst2.instance_id);
         // Endpoints should differ
         assert_ne!(ep1, ep2);
+    }
+
+    #[test]
+    fn test_became_healthy_event() {
+        let dir = ModuleManager::new();
+        let mut rx = dir.events_tx.subscribe();
+
+        let instance_id = Uuid::new_v4();
+        let instance = Arc::new(
+            ModuleInstance::new("test_module", instance_id)
+                .with_grpc_service("test.Service", Endpoint::http("127.0.0.1", 8001)),
+        );
+
+        dir.register_instance(instance);
+
+        // Drain the Registered event
+        let ev = rx.try_recv().unwrap();
+        assert_eq!(ev.kind, InstanceEventKind::Registered);
+
+        // First heartbeat: Registered → Healthy should fire BecameHealthy
+        dir.update_heartbeat("test_module", instance_id, Instant::now());
+
+        let ev = rx.try_recv().unwrap();
+        assert_eq!(ev.kind, InstanceEventKind::BecameHealthy);
+        assert_eq!(ev.instance_id, instance_id);
+        assert_eq!(ev.module, "test_module");
+        assert!(ev.services.contains(&"test.Service".to_owned()));
+
+        // Second heartbeat: Healthy → Healthy should NOT fire another event
+        dir.update_heartbeat("test_module", instance_id, Instant::now());
+        assert!(
+            rx.try_recv().is_err(),
+            "no event should fire on subsequent heartbeats"
+        );
     }
 }

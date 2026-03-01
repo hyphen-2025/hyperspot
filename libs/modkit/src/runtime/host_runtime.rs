@@ -100,6 +100,12 @@ impl HostRuntime {
             DbOptions::None => None,
         };
 
+        // Register the event subscription interface so gateway modules can
+        // subscribe to instance lifecycle events via wire_and_watch, without
+        // exposing the full ModuleManager API.
+        client_hub
+            .register::<dyn crate::runtime::InstanceEventSource>(Arc::clone(&module_manager) as _);
+
         let ctx_builder = ModuleContextBuilder::new(
             instance_id,
             modules_cfg,

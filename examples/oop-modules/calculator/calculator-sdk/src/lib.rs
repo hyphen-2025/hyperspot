@@ -3,16 +3,16 @@
 //! This crate provides everything needed to consume the calculator service:
 //! - API trait (`CalculatorClientV1`)
 //! - Error types (`CalculatorError`)
-//! - Wiring function (`wire_client`)
+//! - Wiring function (`wire_and_watch_client`)
 //! - Proto stubs for server implementation
 //!
 //! ## Usage
 //!
 //! ```ignore
-//! use calculator_sdk::{CalculatorClientV1, wire_client};
+//! use calculator_sdk::{CalculatorClientV1, wire_and_watch_client};
 //!
-//! // Wire the client into ClientHub
-//! wire_client(&hub, &directory).await?;
+//! // Wire the client into ClientHub with automatic reconnection
+//! let _watcher = wire_and_watch_client(&hub, &directory, &events, cancel).await?;
 //!
 //! // Get the client from ClientHub
 //! let client = hub.get::<dyn CalculatorClientV1>()?;
@@ -29,7 +29,7 @@ pub use api::{CalculatorClientV1, CalculatorError};
 // === WIRING ===
 mod client;
 mod wiring;
-pub use wiring::wire_client;
+pub use wiring::wire_and_watch_client;
 
 // === GRPC PROTO STUBS (for server implementation) ===
 /// Generated protobuf types for CalculatorService

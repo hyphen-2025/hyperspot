@@ -8,6 +8,7 @@ ModKit supports running modules as separate processes with gRPC-based inter-proc
 - **Rule**: For gRPC: server implementations live in the module itself; the SDK crate provides only the client.
 - **Rule**: For gRPC clients: always use `modkit_transport_grpc::client` utilities (`connect_with_stack`, `connect_with_retry`).
 - **Rule**: Use `CancellationToken` for coordinated shutdown across the entire process tree.
+- **Rule**: Use `wire_and_watch` (or an SDK-specific `wire_and_watch_client`) for reconnection-safe OoP wiring. Never use the deprecated one-shot `wire_client` for production OoP communication.
 
 ## RuntimeKind
 
@@ -255,31 +256,36 @@ impl MyModuleApi for MyModuleGrpcClient {
 
 ```rust
 // my_module-sdk/src/wiring.rs
+use std::sync::Arc;
+use anyhow::Result;
+use modkit::client_hub::ClientHub;
+use modkit::runtime::InstanceEventSource;
+use modkit::DirectoryClient;
+use tokio_util::sync::CancellationToken;
 use crate::{MyModuleApi, MyModuleGrpcClient, SERVICE_NAME};
-use modkit_transport_grpc::client::{connect_with_stack, connect_with_retry};
-use tonic::transport::Channel;
 
-/// Wire a gRPC client with default stack
-pub async fn wire_client(endpoint: &str) -> Result<Box<dyn MyModuleApi>, Box<dyn std::error::Error>> {
-    let channel = connect_with_stack(endpoint).await?;
-    let client = MyModuleGrpcClient::new(channel);
-    Ok(Box::new(client))
-}
-
-/// Wire a gRPC client with retry logic
-pub async fn build_client(
-    endpoint: &str,
-    max_retries: u32,
-    retry_delay: std::time::Duration,
-) -> Result<Box<dyn MyModuleApi>, Box<dyn std::error::Error>> {
-    let channel = connect_with_retry(endpoint, max_retries, retry_delay).await?;
-    let client = MyModuleGrpcClient::new(channel);
-    Ok(Box::new(client))
-}
-
-/// Get service name for discovery
-pub fn service_name() -> &'static str {
-    SERVICE_NAME
+/// Wire the gRPC client into ClientHub and watch for reconnections.
+///
+/// This is the recommended approach for OoP modules. It automatically
+/// re-wires the client when the module reconnects on a new endpoint.
+pub async fn wire_and_watch_client(
+    hub: &Arc<ClientHub>,
+    directory: &Arc<dyn DirectoryClient>,
+    events: &Arc<dyn InstanceEventSource>,
+    cancel: CancellationToken,
+) -> Result<modkit::GrpcWatcher> {
+    modkit::wire_and_watch::<dyn MyModuleApi>(
+        Arc::clone(hub),
+        Arc::clone(directory),
+        Arc::clone(events),
+        SERVICE_NAME,
+        |uri| Box::pin(async move {
+            let client = MyModuleGrpcClient::connect(&uri).await?;
+            Ok(Arc::new(client) as Arc<dyn MyModuleApi>)
+        }),
+        cancel,
+    )
+    .await
 }
 ```
 
@@ -383,25 +389,39 @@ impl MyModule {
 
 > The `client = ...` attribute validates the trait at compile time and exposes MODULE_NAME, but does not auto-register the client into ClientHub. You must still register it explicitly in your `init()` method using `ctx.client_hub().register::<dyn my_module_sdk::MyModuleApi>(client)`. 
 
-## Client Registration (in module)
+## Client Registration (in gateway module)
 
-### Register both local and remote clients
+### Using `wire_and_watch_client` for reconnection-safe wiring
 
 ```rust
-// In module's init()
-async fn register_clients(&self, ctx: &ModuleCtx) -> anyhow::Result<()> {
-    // Try local client first
-    if let Ok(local_client) = ctx.client_hub().try_get::<dyn my_module_sdk::MyModuleApi>() {
-        ctx.client_hub().register::<dyn my_module_sdk::MyModuleApi>(local_client);
-        return Ok(());
+// In gateway service (lazy wiring on first request)
+pub struct Service {
+    client_hub: Arc<ClientHub>,
+    cancel: CancellationToken,
+    wired: OnceCell<modkit::GrpcWatcher>,
+}
+
+impl Service {
+    pub async fn call_my_module(&self) -> Result<(), ServiceError> {
+        // Ensure wiring + watcher starts exactly once.
+        // If it fails (no healthy instance yet), retries on next request.
+        self.wired
+            .get_or_try_init(|| async {
+                let mgr = self.client_hub.get::<ModuleManager>()?;
+                let directory: Arc<dyn DirectoryClient> = Arc::new(LocalDirectoryClient::new(mgr.clone()));
+                let events: Arc<dyn InstanceEventSource> = mgr;
+                my_module_sdk::wire_and_watch_client(
+                    &self.client_hub, &directory, &events, self.cancel.clone()
+                ).await
+            })
+            .await?;
+
+        let client = self.client_hub.get::<dyn my_module_sdk::MyModuleApi>()?;
+        // Use client — if the OoP module reconnects, the watcher
+        // automatically replaces the client in ClientHub.
+        client.do_something(input).await?;
+        Ok(())
     }
-    
-    // Fall back to remote client
-    let endpoint = "http://127.0.0.1:50051";
-    let remote_client = my_module_sdk::wire_client(endpoint).await?;
-    ctx.client_hub().register::<dyn my_module_sdk::MyModuleApi>(remote_client);
-    
-    Ok(())
 }
 ```
 
@@ -430,12 +450,46 @@ async fn test_grpc_client() {
 }
 ```
 
+## Reconnection
+
+### The problem
+
+When an OoP module disconnects and reconnects (e.g., crash recovery, rolling restart), it binds to a **new ephemeral port**. The `ModuleManager` (directory) correctly registers the new endpoint, but previously the cached gRPC client in `ClientHub` still pointed at the old dead socket.
+
+### The solution: `wire_and_watch`
+
+`modkit::wire_and_watch` is a framework-level utility that:
+
+1. Performs initial wiring: resolves the endpoint from `ModuleManager`, calls the connect factory, registers the client in `ClientHub`.
+2. Subscribes to `ModuleManager`'s `InstanceEvent` broadcast.
+3. On any event for the watched service: re-resolves, reconnects, and atomically replaces the client in `ClientHub`.
+4. On connect failure: removes the stale client so callers get a clear `NotFound` error instead of hitting a dead socket.
+
+Each SDK crate provides a thin `wire_and_watch_client` wrapper that supplies the service-specific connect factory.
+
+### Event types
+
+```rust
+pub enum InstanceEventKind {
+    Registered,    // New instance or re-registration
+    Deregistered,  // Explicit removal
+    Evicted,       // Heartbeat-based eviction
+}
+```
+
+Events are fired **after** `DashMap` locks are released to avoid contention.
+
+### Multi-instance note
+
+In multi-instance topologies the watcher re-resolves on *any* event for the watched service, even if the event doesn't affect the current client's endpoint. This is intentional: the re-wire is cheap, last-writer-wins is safe for single-instance OoP, and comparing URIs would introduce false negatives (same-port reconnect, round-robin rotation). The `Lagged` path already unconditionally re-resolves.
+
 ## Quick checklist
 
 - [ ] Create `*-sdk` crate with API trait, types, gRPC client, and wiring helpers.
 - [ ] Define `.proto` file and generate gRPC stubs in SDK.
 - [ ] Implement gRPC server in module crate.
 - [ ] Use `modkit_transport_grpc::client` utilities for connections.
-- [ ] Register both local and remote clients in module.
+- [ ] Add `wire_and_watch_client` to SDK for reconnection-safe wiring.
+- [ ] Use `wire_and_watch_client` in gateway service (not the deprecated `wire_client`).
 - [ ] Use `CancellationToken` for coordinated shutdown.
-- [ ] Test with mock gRPC servers.
+- [ ] Test with mock gRPC servers, including reconnection scenarios.

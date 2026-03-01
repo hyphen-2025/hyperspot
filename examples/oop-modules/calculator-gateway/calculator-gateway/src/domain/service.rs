@@ -1,15 +1,17 @@
 //! Domain service for calculator_gateway
 //!
 //! Contains business logic for accumulator operations.
-//! Resolves calculator client from ClientHub at call time.
+//! Uses `wire_and_watch_client` for reconnection-safe OoP wiring.
 
 use std::sync::Arc;
 
 use calculator_sdk::CalculatorClientV1;
 use modkit::client_hub::ClientHub;
+use modkit::runtime::InstanceEventSource;
 use modkit_macros::domain_model;
 use modkit_security::SecurityContext;
 use tokio::sync::OnceCell;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument};
 
 /// Error type for Service operations.
@@ -30,18 +32,21 @@ pub enum ServiceError {
 
 /// Domain service that orchestrates accumulator operations.
 ///
-/// Holds a reference to ClientHub for resolving dependencies at call time.
+/// Uses `wire_and_watch_client` to automatically re-wire the gRPC client
+/// when the calculator OoP module reconnects on a new endpoint.
 #[domain_model]
 pub struct Service {
     client_hub: Arc<ClientHub>,
-    wired: OnceCell<()>,
+    cancel: CancellationToken,
+    wired: OnceCell<modkit::GrpcWatcher>,
 }
 
 impl Service {
     /// Create a new service with ClientHub for dependency resolution.
-    pub fn new(client_hub: Arc<ClientHub>) -> Self {
+    pub fn new(client_hub: Arc<ClientHub>, cancel: CancellationToken) -> Self {
         Self {
             client_hub,
+            cancel,
             wired: OnceCell::new(),
         }
     }
@@ -51,24 +56,38 @@ impl Service {
     pub async fn add(&self, ctx: &SecurityContext, a: i64, b: i64) -> Result<i64, ServiceError> {
         debug!("Resolving calculator client from ClientHub");
 
-        // Ensure wiring happens exactly once, even under concurrent callers.
+        // Ensure wiring + watcher starts exactly once, even under concurrent callers.
         // Why not on init?  CalculatorGateway::init() runs during the init phase,
         // before the OoP child is spawned (which happens after the start phase).
-        // So the LocalDirectoryClient won't have the calculator's endpoint registered yet
-        // when wire_client tries to resolve it.
+        // So the DirectoryClient won't have the calculator's endpoint registered yet
+        // when wire_and_watch_client tries to resolve it.
+        //
+        // If wire_and_watch_client fails (no healthy instance yet), get_or_try_init
+        // retries on the next request.
         self.wired
             .get_or_try_init(|| async {
                 let directory = self
                     .client_hub
                     .get::<dyn modkit::DirectoryClient>()
                     .map_err(|e| {
-                        ServiceError::Internal(format!("DirectoryClient not available: {}", e))
+                        ServiceError::Internal(format!("DirectoryClient not available: {e}"))
                     })?;
-                calculator_sdk::wire_client(&self.client_hub, directory.as_ref())
-                    .await
+                let events = self
+                    .client_hub
+                    .get::<dyn InstanceEventSource>()
                     .map_err(|e| {
-                        ServiceError::Internal(format!("Failed to wire calculator client: {}", e))
-                    })
+                        ServiceError::Internal(format!("InstanceEventSource not available: {e}"))
+                    })?;
+                calculator_sdk::wire_and_watch_client(
+                    &self.client_hub,
+                    &directory,
+                    &events,
+                    self.cancel.clone(),
+                )
+                .await
+                .map_err(|e| {
+                    ServiceError::Internal(format!("Failed to wire calculator client: {e}"))
+                })
             })
             .await?;
 
@@ -76,7 +95,7 @@ impl Service {
             .client_hub
             .get::<dyn CalculatorClientV1>()
             .map_err(|e| {
-                ServiceError::Internal(format!("CalculatorClientV1 not available: {}", e))
+                ServiceError::Internal(format!("CalculatorClientV1 not available: {e}"))
             })?;
 
         debug!("Delegating addition to calculator service");

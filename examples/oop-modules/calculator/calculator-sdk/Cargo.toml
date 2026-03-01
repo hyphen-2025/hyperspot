@@ -23,9 +23,13 @@ tonic-prost = { workspace = true }
 prost = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+tokio-util = { workspace = true }
 
 [build-dependencies]
 tonic-prost-build = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+uuid = { workspace = true }

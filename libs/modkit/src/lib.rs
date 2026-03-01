@@ -139,6 +139,10 @@ pub use directory::{
     ServiceInstanceInfo,
 };
 
+// OoP reconnection-safe wiring
+pub mod wiring;
+pub use wiring::{GrpcWatcher, WatcherGoneError, wire_and_watch};
+
 // GTS schema support
 pub mod gts;
 
@@ -152,8 +156,8 @@ pub use backends::{
 pub use lifecycle::{Lifecycle, Runnable, Status, StopReason, WithLifecycle};
 pub use plugins::GtsPluginSelector;
 pub use runtime::{
-    DbOptions, Endpoint, ModuleInstance, ModuleManager, OopModuleSpawnConfig, OopSpawnOptions,
-    RunOptions, ShutdownOptions, run,
+    DbOptions, Endpoint, InstanceEvent, InstanceEventKind, InstanceEventSource, ModuleInstance,
+    ModuleManager, OopModuleSpawnConfig, OopSpawnOptions, RunOptions, ShutdownOptions, run,
 };
 
 #[cfg(feature = "bootstrap")]
